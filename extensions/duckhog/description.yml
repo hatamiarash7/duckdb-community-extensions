@@ -1,6 +1,6 @@
 extension:
   name: duckhog
-  description: Query PostHog data warehouse from DuckDB over Arrow Flight SQL
+  description: Query Arrow Flight SQL servers that expose DuckLake-based catalogs and tables directly from DuckDB using standard SQL — including PostHog's managed data warehouse via [Duckgres](https://github.com/PostHog/duckgres).
   version: 0.2.0
   language: C++
   build: cmake
