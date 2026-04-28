@@ -31,4 +31,4 @@ extension:
     - crazy-treyn
 repo:
   github: crazy-treyn/pbi_scanner
-  ref: f601c23036191dea9888b8f96a03ebbdd32d50fa
+  ref: ac6c022727d49036cefd86e34f600780ef68d44e
