@@ -1,22 +1,14 @@
 docs:
   extended_description: |
-    Query Power BI Semantic Models from DuckDB using DAX/XMLA. The example below uses DuckDB's Azure extension and Azure CLI credential chain; run `az login` first and replace the workspace and semantic model placeholders with values you can access.
+    Query Power BI Semantic Models from DuckDB using DAX/XMLA. Authenticate with Azure CLI first (`az login`), then use `SET pbi_scanner_auth_mode='azure_cli'` for session-default auth and replace the workspace and semantic model placeholders with values you can access.
   hello_world: |
-    INSTALL azure;
-    LOAD azure;
-
-    CREATE SECRET pbi_cli (
-        TYPE azure,
-        PROVIDER credential_chain,
-        CHAIN 'cli'
-    );
-
     INSTALL pbi_scanner FROM community;
     LOAD pbi_scanner;
+    SET pbi_scanner_auth_mode = 'azure_cli';
 
     SELECT *
     FROM dax_query(
-        'Data Source=powerbi://api.powerbi.com/v1.0/myorg/Example%20Workspace;Initial Catalog=example_semantic_model;Secret=pbi_cli;',
+        'Data Source=powerbi://api.powerbi.com/v1.0/myorg/Example%20Workspace;Initial Catalog=example_semantic_model;',
         'EVALUATE ROW("probe_ok", 1)'
     );
 extension:
