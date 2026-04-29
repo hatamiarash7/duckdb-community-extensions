@@ -7,7 +7,7 @@
 | Function | Summary |
 | --- | --- |
 | [`RT_Drivers`](#rt_drivers) | Returns the list of supported GDAL RASTER drivers and file formats. |
-| [`RT_Read`](#rt_read) | Reads a raster file and returns a table with the raster data. |
+| [`RT_Read`](#rt_read) | Reads a raster file (or a mosaic of raster files) and returns a table with the raster data. |
 | [`COPY TO`](#rt_write) | Exports the data table to a new raster file. |
 
 **[Scalar Functions](#scalar-functions)**
@@ -17,8 +17,17 @@
 | [`RT_Cube2Array`](#rt_cube2array) | Transforms the data of the datacube columns into an array of a numeric data type. |
 | [`RT_Cube2Type`](#rt_cube2type) | Transforms a datacube column to another data type. |
 | [`RT_Array2Cube`](#rt_array2cube) | Transforms an array of numeric values into a datacube column. |
-| [`RT_CubeUnaryOp`](#rt_cubeunaryop) | Applies an unary operation to the values in the datacube element-wise. |
-| [`RT_CubeBinaryOp`](#rt_cubebinaryop) | Applies a binary operation to the values in the datacube element-wise. |
+| [`RT_Cube<UnaryOp>`](#rt_cubeunaryop) | Applies an unary operation to the values in the datacube element-wise. |
+| [`RT_Cube<BinaryOp>`](#rt_cubebinaryop) | Applies a binary operation to the values in the datacube element-wise. |
+| [`RT_CubeStats`](#rt_cubestats) | Calculates statistics for a specific band of a data cube. |
+
+**[Spatial Functions](#spatial-functions)**
+
+| Function | Summary |
+| --- | --- |
+| [`RT_CubePolygonize`](#rt_cubepolygonize) | Creates a polygon geometry for each contiguous region of non-no-data values in the data cube. |
+| [`RT_CubeClip`](#rt_cubeclip) | Returns a data cube where cells outside the given geometry are replaced by the specified value. |
+| [`RT_CubeBurn`](#rt_cubeburn) | Returns a data cube where cells inside the given geometry are replaced by the specified value. |
 
 ----
 
@@ -48,11 +57,15 @@ SELECT * FROM RT_Drivers();
 
 ### RT_Read
 
+Open a raster file (or a mosaic of raster files) and return a table with the raster data.
+
+The function accepts a string or a list of strings as input. In case of a list of strings, the function creates a virtual raster (VRT) mosaic of the input files, which allows you to read multiple raster files as if they were one. This is especially useful when working with large rasters that are split into multiple files.
+
 The `RT_Read` table function is based on the [GDAL](https://gdal.org/index.html) translator library and enables reading raster data from a variety of geospatial raster file formats as if they were DuckDB tables.
 
 > See [RT_Drivers](#rt_drivers) for a list of supported file formats and drivers.
 
-The table returned by `RT_Read` is a tiled representation of the raster file, where each row corresponds to a tile of the raster. The tile size is determined by the original block size of the raster file, but it can be overridden by the user using the `blocksize_x` and `blocksize_y` parameters. The `geometry` column is a `GEOMETRY` of type `POLYGON` that represents the footprint of each tile, and you can use it to create a new geoparquet file by adding the option `GEOPARQUET_VERSION`.
+The table returned by `RT_Read` is a tiled representation of the raster file[s], where each row corresponds to a tile of the raster. The tile size is determined by the original block size of the raster file[s], but it can be overridden by the user using the `blocksize_x` and `blocksize_y` parameters. The `geometry` column is a `GEOMETRY` of type `POLYGON` that represents the footprint of each tile, and you can use it to create a new geoparquet file by adding the option `GEOPARQUET_VERSION`.
 
 Within this extension, the `databand` and `datacube` terms refer to the same underlying structure: an N-dimensional BLOB array holding the pixel values of one or more raster bands. A `databand` column refers to data for a single band, while a `datacube` column interleaves all bands into one. By default, `RT_Read` returns one `databand` column per band (`databand_1`, `databand_2`, etc.), but when the `datacube` option is set to `true`, it returns a single `datacube` column with all bands interleaved.
 
@@ -61,9 +74,10 @@ The `RT_Read` function accepts parameters, most of them optional:
 | Parameter | Type | Description |
 | --------- | -----| ----------- |
 | `path` | VARCHAR | The path to the file to read. The only mandatory parameter. |
-| `open_options` | VARCHAR[] | A list of key-value pairs that are passed to the GDAL driver to control the opening of the file. Refer to the GDAL documentation for available options. |
-| `allowed_drivers` | VARCHAR[] | A list of GDAL driver names that are allowed to be used to open the file. If empty, all drivers are allowed. |
-| `sibling_files` | VARCHAR[] | A list of sibling files that are required to open the file. |
+| `open_options` | VARCHAR[] | A list of key-value pairs that are passed to the GDAL driver to control the opening of the file. Refer to the GDAL documentation for available options. Only for single-file version of the function. |
+| `allowed_drivers` | VARCHAR[] | A list of GDAL driver names that are allowed to be used to open the file. If empty, all drivers are allowed. Only for single-file version of the function. |
+| `sibling_files` | VARCHAR[] | A list of sibling files that are required to open the file. Only for single-file version of the function. |
+| `separate_bands` | BOOLEAN | `true` means that each input goes into a separate band in the VRT dataset. Otherwise, the files are considered as source rasters of a larger mosaic and the VRT file has the same number of bands as the input files. Only for multi-file version of the function. |
 | `data_format` | VARCHAR | The data format to use when packing the databand column. `RAW` is the only option currently supported. |
 | `blocksize_x` | INTEGER | The block size of the tile in the x direction. You can use this parameter to override the original block size of the raster. |
 | `blocksize_y` | INTEGER | The block size of the tile in the y direction. You can use this parameter to override the original block size of the raster. |
@@ -90,6 +104,10 @@ The data band columns are a BLOB with the following internal structure:
 		| Code | Key | Description |
 		|------|-----------|-------------|
 		| 0    | RAW | Uncompressed raw data, interleaved by pixel and band |
+		| 1    | SNAPPY | Snappy compressed data |
+		| 2    | GZIP | GZIP compressed data |
+		| 3    | ZSTD | Zstandard compressed data |
+		| 4    | LZ4 | LZ4 compressed data |
 
 	+ `data_type` (uint8_t): Data type of the values of the tile data:
 
@@ -121,7 +139,7 @@ Note that the `bbox` and `geometry` columns are available for spatial filtering;
 #### Signature
 
 ```sql
-RT_Read (file_path VARCHAR,
+RT_Read (file_path [VARCHAR,VARCHAR[]],
          open_options VARCHAR[] DEFAULT NULL,
          allowed_drivers VARCHAR[] DEFAULT NULL,
          sibling_files VARCHAR[] DEFAULT NULL,
@@ -136,6 +154,17 @@ RT_Read (file_path VARCHAR,
 
 ```sql
 SELECT * FROM RT_Read('path/to/raster/file.tif');
+
+SELECT
+    geometry, databand_1
+FROM
+    RT_Read([
+        'path/to/mosaic/raster-clip00.tif',
+        'path/to/mosaic/raster-clip01.tif',
+        'path/to/mosaic/raster-clip10.tif',
+        'path/to/mosaic/raster-clip11.tif'
+    ])
+;
 ```
 
 ----
@@ -186,9 +215,9 @@ COPY (
 		geometry,
 		databand_1, databand_2, databand_3
 	FROM
-		RT_Read('./test/data/overlay-sample.tiff')
+		RT_Read('path/to/raster/file.tif')
 )
-TO './test/data/copytoraster.tiff'
+TO 'path/to/output/file.tif'
 WITH (
 	FORMAT RASTER,
 	DRIVER 'COG',
@@ -425,15 +454,15 @@ FROM
 
 ### RT_CubeUnaryOp
 
-Applies an unary operation to the values in the datacube element-wise.
+Applies a unary operation to each cell of the input datacube. Returns a new datacube of the same dimensions. No-data cells are preserved.
 
 | Function | Description |
 | -------- | ----------- |
-| `RT_CubeNeg` | Negate the values in the datacube element-wise. |
-| `RT_CubeAbs` | Takes the absolute value of the values in the datacube element-wise. |
-| `RT_CubeSqrt` | Takes the square root of the values in the datacube element-wise. |
-| `RT_CubeLog` | Takes the logarithm of the values in the datacube element-wise. |
-| `RT_CubeExp` | Takes the exponential of the values in the datacube element-wise. |
+| `RT_CubeNeg` | Returns a data cube with each cell negated (multiplied by -1). |
+| `RT_CubeAbs` | Returns a data cube with the absolute value of each cell. |
+| `RT_CubeSqrt` | Returns a data cube with the square root of each cell. |
+| `RT_CubeLog` | Returns a data cube with the natural logarithm of each cell. |
+| `RT_CubeExp` | Returns a data cube with the exponential (e^x) of each cell. |
 
 #### Signature
 
@@ -455,23 +484,41 @@ FROM
 
 ### RT_CubeBinaryOp
 
-Applies a binary operation to the values in the datacube element-wise.
+Applies a binary operation cell-by-cell between two datacubes or a datacube and a scalar. Returns a new datacube of the same dimensions. No-data cells are preserved unless otherwise noted.
+
+**Arithmetic**
 
 | Function | Description |
 | -------- | ----------- |
-| `RT_CubeEqual` | Return 1 where values in `datacube_a` are equal to `datacube_b` or a scalar value, 0 otherwise. |
-| `RT_CubeNotEqual` | Return 1 where values in `datacube_a` are not equal to `datacube_b` or a scalar value, 0 otherwise. |
-| `RT_CubeGreater` | Return 1 where values in `datacube_a` are greater than `datacube_b` or a scalar value, 0 otherwise. |
-| `RT_CubeGreaterEqual` | Return 1 where values in `datacube_a` are greater than or equal to `datacube_b` or a scalar value, 0 otherwise. |
-| `RT_CubeLess` | Return 1 where values in `datacube_a` are less than `datacube_b` or a scalar value, 0 otherwise. |
-| `RT_CubeLessEqual` | Return 1 where values in `datacube_a` are less than or equal to `datacube_b` or a scalar value, 0 otherwise. |
-| `RT_CubeAdd` | Add the values in `datacube_a` to `datacube_b` or a scalar value element-wise. |
-| `RT_CubeSubtract` | Subtract `datacube_b` or a scalar value from the values in `datacube_a` element-wise. |
-| `RT_CubeMultiply` | Multiply the values in `datacube_a` by `datacube_b` or a scalar value element-wise. |
-| `RT_CubeDivide` | Divide the values in `datacube_a` by `datacube_b` or a scalar value element-wise. |
-| `RT_CubePow` | Take the power of the values in `datacube_a` to `datacube_b` or a scalar value element-wise. |
+| `RT_CubeAdd` (`+`) | Returns a data cube with each cell equal to the sum of the two inputs. |
+| `RT_CubeSubtract` (`-`) | Returns a data cube with each cell equal to the left-hand cell minus the right-hand cell. |
+| `RT_CubeMultiply` (`*`) | Returns a data cube with each cell equal to the product of the two inputs. |
+| `RT_CubeDivide` (`/`) | Returns a data cube with each cell equal to the left-hand cell divided by the right-hand cell. |
+| `RT_CubePow` (`^`) | Returns a data cube with each cell raised to the power of the right-hand value. |
+| `RT_CubeMod` (`%`) | Returns a data cube with each cell equal to the remainder of dividing the left-hand cell by the right-hand value. |
 
-The math operators (`+`, `-`, `*`, `/`, `^`, `%`) are also supported as aliases of the corresponding functions.
+**Comparison** (result cells are 1 if true, 0 if false)
+
+| Function | Description |
+| -------- | ----------- |
+| `RT_CubeEqual` | Returns a data cube where each cell is 1 if left == right, 0 otherwise. |
+| `RT_CubeNotEqual` | Returns a data cube where each cell is 1 if left != right, 0 otherwise. |
+| `RT_CubeLess` | Returns a data cube where each cell is 1 if left < right, 0 otherwise. |
+| `RT_CubeLessEqual` | Returns a data cube where each cell is 1 if left <= right, 0 otherwise. |
+| `RT_CubeGreater` | Returns a data cube where each cell is 1 if left > right, 0 otherwise. |
+| `RT_CubeGreaterEqual` | Returns a data cube where each cell is 1 if left >= right, 0 otherwise. |
+
+**Assignment / Utility**
+
+| Function | Description |
+| -------- | ----------- |
+| `RT_CubeSet` | Returns a data cube where valid cells are replaced by the right-hand value. No-data cells in the source are preserved. |
+| `RT_CubeSetNoData` | Returns a data cube where nodata cells are replaced by the specified value, and sets this value as the new nodata sentinel. |
+| `RT_CubeFill` | Returns a data cube where all cells (including no-data) are unconditionally replaced by the right-hand value. |
+| `RT_CubeMin` | Returns a data cube with each cell equal to the minimum of the two inputs. |
+| `RT_CubeMax` | Returns a data cube with each cell equal to the maximum of the two inputs. |
+
+The math operators (`+`, `-`, `*`, `/`, `^`, `%`) are also supported as aliases of the corresponding arithmetic functions.
 
 #### Signature
 
@@ -488,6 +535,214 @@ SELECT
 	(v1 + v2) AS v3
 FROM
 	RT_Read('path/to/raster/file.tif')
+;
+```
+
+----
+
+### RT_CubeStats
+
+Calculates statistics for a specific band (0-based index) of a data cube.
+
+The returned value is a `STRUCT` with the following fields:
+
+| Field | Type | Description |
+| ----- | ---- | ----------- |
+| `minimum` | DOUBLE | Minimum pixel value among valid (non-nodata) cells. |
+| `maximum` | DOUBLE | Maximum pixel value among valid (non-nodata) cells. |
+| `mean` | DOUBLE | Mean (average) of all valid pixel values. |
+| `stddev` | DOUBLE | Population standard deviation of all valid pixel values. |
+| `valid_count` | BIGINT | Number of valid (non-nodata) cells. |
+| `nodata_count` | BIGINT | Number of nodata cells. |
+
+Function accepts the following parameters:
+
+| Parameter | Type | Description |
+| --------- | -----| ----------- |
+| `databand` | DATACUBE | The datacube column to compute statistics for. |
+| `band_index` | INTEGER | The 0-based index of the band to compute statistics for. |
+
+#### Signature
+
+```sql
+RT_CubeStats (databand DATACUBE, band_index INTEGER)
+```
+
+#### Examples
+
+```sql
+SELECT
+    RT_CubeStats(databand_1, 0) AS stats
+FROM
+    RT_Read('path/to/raster/file.tif')
+;
+
+-- Access individual fields:
+SELECT
+    stats.minimum,
+    stats.maximum,
+    stats.mean,
+    stats.stddev,
+    stats.valid_count,
+    stats.nodata_count
+FROM (
+    SELECT RT_CubeStats(databand_1, 0) AS stats
+    FROM RT_Read('path/to/raster/file.tif')
+);
+```
+
+----
+
+## Spatial Functions
+
+### RT_CubePolygonize
+
+Creates a polygon geometry for each contiguous region of non-no-data values in the data cube.
+
+This function takes a datacube column as input and returns polygon geometry representing the contiguous regions of non-no-data values in the datacube. The function needs the tile coordinates, Geo Transform matrix, and blocksize of the datacube to calculate the geometry of the output polygons.
+
+The function accepts the following parameters:
+
+| Parameter | Type | Description |
+| --------- | -----| ----------- |
+| `databand` | DATACUBE | The datacube column to polygonize. |
+| `tile_x` | INTEGER | The tile x coordinate of the tile. |
+| `tile_y` | INTEGER | The tile y coordinate of the tile. |
+| `blocksize_x` | INTEGER | The block size of the tile in the x direction. |
+| `blocksize_y` | INTEGER | The block size of the tile in the y direction. |
+| `geo_transform` | DOUBLE[] | The Geo Transform matrix of the tile. This is an array of 6 values representing the affine transformation coefficients. |
+
+`blocksize_x`, `blocksize_y` and `geo_transform` parameters can be extracted from the datacube `metadata` column.
+
+#### Signature
+
+```sql
+RT_CubePolygonize (databand DATACUBE,
+                   tile_x INTEGER,
+                   tile_y INTEGER,
+                   blocksize_x INTEGER,
+                   blocksize_y INTEGER,
+                   geo_transform DOUBLE[])
+```
+
+#### Examples
+
+```sql
+LOAD json;
+
+SELECT
+    RT_CubePolygonize(databand_1,
+                      tile_x,
+                      tile_y,
+                     (metadata->>'blocksize_x')::INTEGER,
+                     (metadata->>'blocksize_y')::INTEGER,
+                     (metadata->>'transform')::DOUBLE[]) AS geometry
+FROM
+    RT_Read('path/to/raster/file.tif')
+;
+```
+
+----
+
+### RT_CubeClip
+
+Returns a data cube where cells outside the given geometry are replaced by the specified value. Cells inside the geometry are preserved. No-data cells are preserved.
+
+The function accepts the following parameters:
+
+| Parameter | Type | Description |
+| --------- | -----| ----------- |
+| `databand` | DATACUBE | The input datacube column. |
+| `tile_x` | INTEGER | The tile x coordinate of the tile. |
+| `tile_y` | INTEGER | The tile y coordinate of the tile. |
+| `blocksize_x` | INTEGER | The block size of the tile in the x direction. |
+| `blocksize_y` | INTEGER | The block size of the tile in the y direction. |
+| `geo_transform` | DOUBLE[] | The Geo Transform matrix of the tile. This is an array of 6 values representing the affine transformation coefficients. |
+| `geometry` | GEOMETRY | The clip geometry. Cells outside this geometry will be replaced by `value`. | |
+| `value` | DOUBLE | The value to burn into cells outside the geometry. |
+
+#### Signature
+
+```sql
+RT_CubeClip (databand DATACUBE,
+             tile_x INTEGER,
+             tile_y INTEGER,
+             blocksize_x INTEGER,
+             blocksize_y INTEGER,
+             geo_transform DOUBLE[],
+             geometry GEOMETRY,
+             value DOUBLE)
+```
+
+#### Examples
+
+```sql
+LOAD json;
+LOAD spatial;
+
+SELECT
+    RT_CubeClip(databand_1,
+                tile_x,
+                tile_y,
+               (metadata->>'blocksize_x')::INTEGER,
+               (metadata->>'blocksize_y')::INTEGER,
+               (metadata->>'transform')::DOUBLE[],
+                ST_GeomFromText('POLYGON((...))')::GEOMETRY,
+                0.0) AS clipped
+FROM
+    RT_Read('path/to/raster/file.tif')
+;
+```
+
+----
+
+### RT_CubeBurn
+
+Returns a data cube where cells inside the given geometry are replaced by the specified value. Cells outside the geometry are preserved. No-data cells are preserved.
+
+The function accepts the following parameters:
+
+| Parameter | Type | Description |
+| --------- | -----| ----------- |
+| `databand` | DATACUBE | The input datacube column. |
+| `tile_x` | INTEGER | The tile x coordinate of the tile. |
+| `tile_y` | INTEGER | The tile y coordinate of the tile. |
+| `blocksize_x` | INTEGER | The block size of the tile in the x direction. |
+| `blocksize_y` | INTEGER | The block size of the tile in the y direction. |
+| `geo_transform` | DOUBLE[] | The Geo Transform matrix of the tile. This is an array of 6 values representing the affine transformation coefficients. |
+| `geometry` | GEOMETRY | The burn geometry. Cells inside this geometry will be replaced by `value`. | |
+| `value` | DOUBLE | The value to burn into cells inside the geometry. |
+
+#### Signature
+
+```sql
+RT_CubeBurn (databand DATACUBE,
+             tile_x INTEGER,
+             tile_y INTEGER,
+             blocksize_x INTEGER,
+             blocksize_y INTEGER,
+             geo_transform DOUBLE[],
+             geometry GEOMETRY,
+             value DOUBLE)
+```
+
+#### Examples
+
+```sql
+LOAD json;
+LOAD spatial;
+
+SELECT
+    RT_CubeBurn(databand_1,
+                tile_x,
+                tile_y,
+               (metadata->>'blocksize_x')::INTEGER,
+               (metadata->>'blocksize_y')::INTEGER,
+               (metadata->>'transform')::DOUBLE[],
+                ST_GeomFromText('POLYGON((...))')::GEOMETRY,
+                0.0) AS burned
+FROM
+    RT_Read('path/to/raster/file.tif')
 ;
 ```
 
